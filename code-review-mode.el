@@ -3,10 +3,12 @@
 (defvar code-review-username nil "Username to log into the provider.")
 (defvar code-review-password nil "Password for the username.")
 (defvar code-review-url nil "The API URL base (not used for github).")
+(defvar code-review-debug f "Do we want to provide debug output for stuff (when possible)?")
 
 (defvar code-review-mode-map
   (let ((map (make-keymap)))
-    (define-key map (kbd "C-c p") 'code-review/create-review)
+    (define-key map (kbd "C-c p") 'code-review-mode/create-review)
+    (define-key map (kbd "C-c l") 'code-review-mode/load-providers)
     map)
   "Keymap for code review mode")
 
@@ -17,31 +19,36 @@
   :lighter " CR"
   :keymap code-review-mode-map)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;; Required libraries
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (require 'subr-x)
 (require 'json)
 (require 'request)
+(require 'code-review-util)
 
-(defun code-review-mode/exec (cmd)
-  (string-trim-right (shell-command-to-string cmd)))
+; We need to also load in any providers.
+(code-review-mode/load-providers)
 
-(defun code-review-mode/git-exec (cmd)
-  (code-review-mode/exec (format "git %s" cmd)))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;; Private functions
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(defun code-review-mode/load-providers ()
+  "(Re)loads the providers needed (should reside in the same directory as the minor-mode.
 
-(defun code-review-mode/match-regex (regex text)
-  (string-match regex text))
-
-;; Parse a Git URL to get the project and repository
-(defun code-review-mode/parse-git-url (url)
-  ;; In case SSL is used here lets be a little friendly here.  This assumes match 1 is the project and match 2 is the repository
-  (if (or (code-review-mode/match-regex "http.://.*/\\([^/].*\\)/\\([^\.].*\\).git" url) (code-review-mode/match-regex ".*:[^/].*/\\([^/].*\\)/\\(.*\\).git" url))
-      (list (match-string 1 url) (match-string 2 url))))
-
-(defun code-review-mode/git-current-branch ()
-  (code-review-mode/git-exec "rev-parse --abbrev-ref HEAD"))
-
-(defun code-review-mode/clean-url (url)
-  "Remove trailing slashes from the URL"
-  (replace-regexp-in-string "/+$" "" url))
+They must be prefixed by code-review-provider- however.  So if you write a provider for BitBucket, it should be
+code-review-provider-bitbucket.el.  This really helps eliminate any name mangling or conflicts."
+  (interactive)
+  (let ((load (mapcar #'car load-history)))
+    (dolist (file (directory-files (file-name-directory load-file-name) t "code-reivew-provider-\.+\\.elc?$"))
+      (unless (catch 'foo
+		(dolist (done loaded)
+		  (when (equal file done) (throw 'foo t)))
+		nil)
+	(load (file-name-sans-extension file))
+	(push file loaded)))))
 
 (defun code-review-mode/create-url (project repo)
   "Create a URL that is pleasant to use given necessary information."
@@ -50,5 +57,23 @@
     (if (eq "github" code-review-provider)
 	(format "https://api.github.com/repos/%s/%s/pulls" project repo)
       )))
+
+(defun code-review-mode/provider-function (func-name)
+  "Simply creates a string of the provider function to call."
+  (format "%s-%s" code-review-provider func-name))
+
+(defun code-review-mode/create-review ()
+  "Creates a request to the provider for a code review and then returns the link (if possible)."
+  (interactive)
+  (request
+   (code-review-util/call-func (code-review-mode/provider-function "get-url") "provider")
+   :type (code-review-util/call-func (code-review-mode/provider-function "get-request-type") "provider")
+   :parser (code-review-util/call-func (code-review-mode/provider-function "get-parser") "provider")
+   :data (code-review-util/call-func (code-review-mode/provider-function "request-data") "provider")
+   :headers `(code-reivew-util/call-func (code-review-mode/provider-function "get-request-headers") "provider")
+   :success (function* (lambda &key data &allow-other-keys)
+		       (code-review-util/call-func (code-review-mode/provider-function "process-success") "provider"))
+   :error (function* (lambda &key error-thrown &allow-other-keys &rest _)
+		     (code-review-util/call-func (code-review-mode/provider-function "process-error") "provider"))))
 
 (provide 'code-review-mode)
